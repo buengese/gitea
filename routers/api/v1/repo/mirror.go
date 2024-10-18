@@ -13,6 +13,7 @@ import (
 	"code.gitea.io/gitea/models/db"
 	repo_model "code.gitea.io/gitea/models/repo"
 	"code.gitea.io/gitea/models/unit"
+	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/setting"
 	api "code.gitea.io/gitea/modules/structs"
 	"code.gitea.io/gitea/modules/util"
@@ -23,6 +24,7 @@ import (
 	"code.gitea.io/gitea/services/forms"
 	"code.gitea.io/gitea/services/migrations"
 	mirror_service "code.gitea.io/gitea/services/mirror"
+	repo_service "code.gitea.io/gitea/services/repository"
 )
 
 // MirrorSync adds a mirrored repository to the sync queue
@@ -72,6 +74,66 @@ func MirrorSync(ctx *context.APIContext) {
 	}
 
 	mirror_service.AddPullMirrorToQueue(repo.ID)
+
+	ctx.Status(http.StatusOK)
+}
+
+// MirrorConvert converts a pull mirror into a regular repository
+func MirrorConvert(ctx *context.APIContext) {
+	// swagger:operation POST /repos/{owner}/{repo}/mirror-convert repository repoMirrorConvert
+	// ---
+	// summary: Convert a mirrored repository into a regular repository
+	// produces:
+	// - application/json
+	// parameters:
+	// - name: owner
+	//   in: path
+	//   description: owner of the repo to sync
+	//   type: string
+	//   required: true
+	// - name: repo
+	//   in: path
+	//   description: name of the repo to sync
+	//   type: string
+	//   required: true
+	// responses:
+	//   "200":
+	//     "$ref": "#/responses/empty"
+	//   "403":
+	//     "$ref": "#/responses/forbidden"
+	//   "500":
+	//     "$ref": "#/responses/error"
+	repo := ctx.Repo.Repository
+
+	if !ctx.Repo.IsOwner() {
+		ctx.Error(http.StatusForbidden, "MirrorConvert", "Must be repo owner")
+		return
+	}
+
+	if !setting.Mirror.Enabled {
+		ctx.Error(http.StatusBadRequest, "MirrorConvert", "Mirrur feature is disabled")
+		return
+	}
+
+	if _, err := repo_model.GetMirrorByRepoID(ctx, repo.ID); err != nil {
+		if errors.Is(err, repo_model.ErrMirrorNotExist) {
+			ctx.Error(http.StatusBadRequest, "MirrorConvert", "Repository is not a mirror")
+			return
+		}
+		ctx.Error(http.StatusInternalServerError, "MirrorConvert", err)
+		return
+	}
+
+	repo.IsMirror = false
+
+	if _, err := repo_service.CleanUpMigrateInfo(ctx, repo); err != nil {
+		ctx.ServerError("CleanUpMigrateInfo", err)
+		return
+	} else if err = repo_model.DeleteMirrorByRepoID(ctx, ctx.Repo.Repository.ID); err != nil {
+		ctx.ServerError("DeleteMirrorByRepoID", err)
+		return
+	}
+	log.Trace("Repository converted from mirror to regular: %s", repo.FullName())
 
 	ctx.Status(http.StatusOK)
 }
